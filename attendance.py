@@ -1,0 +1,632 @@
+"""
+attendance.py - Attendance Management Module
+==================================================
+Handles tracking of subject-wise classroom attendance,
+calculates attendance percentages, and determines compliance status
+(Good: >=75%, Average: 60-74%, Low: <60%).
+"""
+
+import tkinter as tk
+from tkinter import ttk, messagebox
+import sqlite3
+
+from database import get_connection
+from utils import (
+    THEME, FONT_TITLE, FONT_SUBTITLE, FONT_HEADING, FONT_REGULAR, FONT_BOLD, FONT_SMALL,
+    validate_attendance, get_attendance_status
+)
+
+
+class AttendanceManagementFrame(tk.Frame):
+    def __init__(self, parent, on_data_change=None):
+        super().__init__(parent, bg=THEME["bg_main"])
+        self.on_data_change = on_data_change
+
+        self.selected_att_id = None
+
+        # Form Variables
+        self.var_student_id = tk.StringVar()
+        self.var_student_info = tk.StringVar(value="Select or enter valid Student ID")
+        self.var_subject = tk.StringVar()
+        self.var_total_classes = tk.StringVar(value="40")
+        self.var_attended = tk.StringVar()
+        self.var_percentage = tk.StringVar(value="0.0 %")
+        self.var_status = tk.StringVar(value="--")
+
+        # Search variable
+        self.var_search_query = tk.StringVar()
+
+        # Cumulative Student Attendance Variables
+        self.var_cum_total = tk.StringVar(value="0")
+        self.var_cum_attended = tk.StringVar(value="0")
+        self.var_cum_percentage = tk.StringVar(value="0.0 %")
+        self.var_cum_status = tk.StringVar(value="--")
+
+        # Build UI
+        self.create_widgets()
+        self.refresh_student_ids()
+        self.fetch_attendance()
+
+    def create_widgets(self):
+        # 1. Header Bar
+        header_frame = tk.Frame(self, bg=THEME["bg_card"], bd=1, relief=tk.SOLID)
+        header_frame.pack(fill=tk.X, padx=15, pady=(15, 10))
+
+        lbl_title = tk.Label(
+            header_frame,
+            text="📅 Attendance Tracking — University Compliance & Eligibility",
+            font=FONT_SUBTITLE,
+            fg=THEME["text_dark"],
+            bg=THEME["bg_card"]
+        )
+        lbl_title.pack(side=tk.LEFT, padx=15, pady=10)
+
+        lbl_info = tk.Label(
+            header_frame,
+            text="Threshold: Good (≥75%), Average (60-74%), Low (<60% Shortage Alert)",
+            font=FONT_REGULAR,
+            fg=THEME["text_muted"],
+            bg=THEME["bg_card"]
+        )
+        lbl_info.pack(side=tk.RIGHT, padx=15, pady=10)
+
+        # 2. Main Body Container
+        body_frame = tk.Frame(self, bg=THEME["bg_main"])
+        body_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 15))
+
+        # -------------------------------------------------------------
+        # LEFT PANEL: FORM INPUTS & CUMULATIVE SUMMARY
+        # -------------------------------------------------------------
+        left_card = tk.LabelFrame(
+            body_frame,
+            text=" Attendance Entry Form ",
+            font=FONT_HEADING,
+            fg=THEME["primary"],
+            bg=THEME["bg_card"],
+            bd=1,
+            relief=tk.SOLID
+        )
+        left_card.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10), ipadx=10, ipady=10)
+
+        form_grid = tk.Frame(left_card, bg=THEME["bg_card"])
+        form_grid.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        # Student ID Selector
+        lbl_sid = tk.Label(form_grid, text="Student ID *:", font=FONT_REGULAR, fg=THEME["text_dark"], bg=THEME["bg_card"])
+        lbl_sid.grid(row=0, column=0, sticky="w", pady=6)
+
+        self.cmb_student_id = ttk.Combobox(form_grid, textvariable=self.var_student_id, font=FONT_REGULAR, width=22)
+        self.cmb_student_id.grid(row=0, column=1, sticky="w", pady=6)
+        self.cmb_student_id.bind("<<ComboboxSelected>>", self.on_student_change)
+        self.cmb_student_id.bind("<KeyRelease>", self.on_student_change)
+
+        # Student Name Badge
+        lbl_badge = tk.Label(
+            form_grid,
+            textvariable=self.var_student_info,
+            font=FONT_SMALL,
+            fg=THEME["primary"],
+            bg="#eff6ff",
+            bd=1,
+            relief=tk.SOLID,
+            wraplength=200,
+            justify=tk.LEFT
+        )
+        lbl_badge.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 10), ipady=3)
+
+        # Subject Selector
+        lbl_sub = tk.Label(form_grid, text="Subject *:", font=FONT_REGULAR, fg=THEME["text_dark"], bg=THEME["bg_card"])
+        lbl_sub.grid(row=2, column=0, sticky="w", pady=6)
+
+        self.cmb_subjects = ttk.Combobox(
+            form_grid,
+            textvariable=self.var_subject,
+            values=[
+                "Database Management Systems",
+                "Operating Systems",
+                "Computer Networks",
+                "Data Structures & Algorithms",
+                "Discrete Mathematics",
+                "Software Engineering",
+                "Web Technologies",
+                "Artificial Intelligence"
+            ],
+            font=FONT_REGULAR,
+            width=22
+        )
+        self.cmb_subjects.grid(row=2, column=1, sticky="w", pady=6)
+        if self.cmb_subjects["values"]:
+            self.cmb_subjects.set(self.cmb_subjects["values"][0])
+
+        # Total Classes Conducted
+        lbl_tot = tk.Label(form_grid, text="Total Classes *:", font=FONT_REGULAR, fg=THEME["text_dark"], bg=THEME["bg_card"])
+        lbl_tot.grid(row=3, column=0, sticky="w", pady=6)
+
+        ent_tot = tk.Entry(form_grid, textvariable=self.var_total_classes, font=FONT_REGULAR, bd=1, relief=tk.SOLID, width=24)
+        ent_tot.grid(row=3, column=1, sticky="w", pady=6)
+        ent_tot.bind("<KeyRelease>", lambda e: self.auto_compute())
+
+        # Classes Attended
+        lbl_att = tk.Label(form_grid, text="Classes Attended *:", font=FONT_REGULAR, fg=THEME["text_dark"], bg=THEME["bg_card"])
+        lbl_att.grid(row=4, column=0, sticky="w", pady=6)
+
+        ent_att = tk.Entry(form_grid, textvariable=self.var_attended, font=FONT_REGULAR, bd=1, relief=tk.SOLID, width=24)
+        ent_att.grid(row=4, column=1, sticky="w", pady=6)
+        ent_att.bind("<KeyRelease>", lambda e: self.auto_compute())
+
+        # Attendance Percentage
+        lbl_pct = tk.Label(form_grid, text="Attendance %:", font=FONT_BOLD, fg=THEME["text_dark"], bg=THEME["bg_card"])
+        lbl_pct.grid(row=5, column=0, sticky="w", pady=6)
+
+        lbl_pct_val = tk.Label(form_grid, textvariable=self.var_percentage, font=FONT_BOLD, fg=THEME["primary"], bg=THEME["bg_card"])
+        lbl_pct_val.grid(row=5, column=1, sticky="w", pady=6)
+
+        # Eligibility Status
+        lbl_sta = tk.Label(form_grid, text="Eligibility Status:", font=FONT_BOLD, fg=THEME["text_dark"], bg=THEME["bg_card"])
+        lbl_sta.grid(row=6, column=0, sticky="w", pady=6)
+
+        self.lbl_status_display = tk.Label(
+            form_grid,
+            textvariable=self.var_status,
+            font=("Segoe UI", 11, "bold"),
+            fg=THEME["success"],
+            bg=THEME["bg_card"]
+        )
+        self.lbl_status_display.grid(row=6, column=1, sticky="w", pady=6)
+
+        # Action Buttons
+        btn_box = tk.Frame(left_card, bg=THEME["bg_card"])
+        btn_box.pack(fill=tk.X, padx=10, pady=(15, 5))
+
+        btn_row1 = tk.Frame(btn_box, bg=THEME["bg_card"])
+        btn_row1.pack(fill=tk.X, pady=3)
+
+        btn_add = tk.Button(
+            btn_row1, text="➕ Add Attendance", font=FONT_BOLD, bg=THEME["success"], fg=THEME["text_light"],
+            activebackground=THEME["success_hover"], relief=tk.FLAT, cursor="hand2", command=self.add_attendance
+        )
+        btn_add.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4), ipady=4)
+
+        btn_upd = tk.Button(
+            btn_row1, text="✏️ Update", font=FONT_BOLD, bg=THEME["warning"], fg=THEME["text_light"],
+            activebackground=THEME["warning_hover"], relief=tk.FLAT, cursor="hand2", command=self.update_attendance
+        )
+        btn_upd.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4, ipady=4)
+
+        btn_row2 = tk.Frame(btn_box, bg=THEME["bg_card"])
+        btn_row2.pack(fill=tk.X, pady=3)
+
+        btn_del = tk.Button(
+            btn_row2, text="🗑️ Delete", font=FONT_BOLD, bg=THEME["danger"], fg=THEME["text_light"],
+            activebackground=THEME["danger_hover"], relief=tk.FLAT, cursor="hand2", command=self.delete_attendance
+        )
+        btn_del.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4), ipady=4)
+
+        btn_clr = tk.Button(
+            btn_row2, text="🔄 Clear", font=FONT_BOLD, bg=THEME["primary"], fg=THEME["text_light"],
+            activebackground=THEME["primary_hover"], relief=tk.FLAT, cursor="hand2", command=self.clear_form
+        )
+        btn_clr.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4, ipady=4)
+
+        # Cumulative Student Attendance Badge
+        cum_card = tk.LabelFrame(
+            left_card,
+            text=" Overall Student Attendance Summary ",
+            font=FONT_SMALL,
+            fg=THEME["text_dark"],
+            bg="#f1f5f9",
+            bd=1,
+            relief=tk.SOLID
+        )
+        cum_card.pack(fill=tk.X, padx=10, pady=(15, 0), ipady=6)
+
+        tk.Label(cum_card, text="Total Classes (All Subjects):", font=FONT_SMALL, bg="#f1f5f9").grid(row=0, column=0, sticky="w", padx=8, pady=2)
+        tk.Label(cum_card, textvariable=self.var_cum_total, font=FONT_BOLD, bg="#f1f5f9").grid(row=0, column=1, sticky="w", padx=4, pady=2)
+
+        tk.Label(cum_card, text="Total Classes Attended:", font=FONT_SMALL, bg="#f1f5f9").grid(row=1, column=0, sticky="w", padx=8, pady=2)
+        tk.Label(cum_card, textvariable=self.var_cum_attended, font=FONT_BOLD, bg="#f1f5f9").grid(row=1, column=1, sticky="w", padx=4, pady=2)
+
+        tk.Label(cum_card, text="Cumulative Percentage:", font=FONT_SMALL, bg="#f1f5f9").grid(row=2, column=0, sticky="w", padx=8, pady=2)
+        tk.Label(cum_card, textvariable=self.var_cum_percentage, font=FONT_BOLD, fg=THEME["primary"], bg="#f1f5f9").grid(row=2, column=1, sticky="w", padx=4, pady=2)
+
+        tk.Label(cum_card, text="Cumulative Status:", font=FONT_SMALL, bg="#f1f5f9").grid(row=3, column=0, sticky="w", padx=8, pady=2)
+        self.lbl_cum_status = tk.Label(cum_card, textvariable=self.var_cum_status, font=FONT_BOLD, fg=THEME["success"], bg="#f1f5f9")
+        self.lbl_cum_status.grid(row=3, column=1, sticky="w", padx=4, pady=2)
+
+        # -------------------------------------------------------------
+        # RIGHT PANEL: SEARCH TOOLBAR & TREEVIEW
+        # -------------------------------------------------------------
+        right_card = tk.LabelFrame(
+            body_frame,
+            text=" Recorded Attendance Logs ",
+            font=FONT_HEADING,
+            fg=THEME["primary"],
+            bg=THEME["bg_card"],
+            bd=1,
+            relief=tk.SOLID
+        )
+        right_card.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+        # Filter bar
+        filter_bar = tk.Frame(right_card, bg=THEME["bg_card"])
+        filter_bar.pack(fill=tk.X, padx=10, pady=8)
+
+        lbl_filter = tk.Label(filter_bar, text="Filter by Student ID / Name:", font=FONT_BOLD, fg=THEME["text_dark"], bg=THEME["bg_card"])
+        lbl_filter.pack(side=tk.LEFT, padx=(0, 5))
+
+        ent_filter = tk.Entry(filter_bar, textvariable=self.var_search_query, font=FONT_REGULAR, bd=1, relief=tk.SOLID, width=22)
+        ent_filter.pack(side=tk.LEFT, padx=5, ipady=2)
+        ent_filter.bind("<Return>", lambda e: self.search_attendance())
+
+        btn_search = tk.Button(filter_bar, text="🔍 Search", font=FONT_BOLD, bg=THEME["primary"], fg=THEME["text_light"], relief=tk.FLAT, cursor="hand2", command=self.search_attendance)
+        btn_search.pack(side=tk.LEFT, padx=4, ipady=1)
+
+        btn_show_all = tk.Button(filter_bar, text="🔄 Show All", font=FONT_REGULAR, bg=THEME["info"], fg=THEME["text_light"], relief=tk.FLAT, cursor="hand2", command=self.fetch_attendance)
+        btn_show_all.pack(side=tk.LEFT, padx=4, ipady=1)
+
+        self.lbl_count = tk.Label(filter_bar, text="Records: 0", font=FONT_BOLD, fg=THEME["text_muted"], bg=THEME["bg_card"])
+        self.lbl_count.pack(side=tk.RIGHT, padx=10)
+
+        # Treeview
+        table_frame = tk.Frame(right_card, bg=THEME["bg_card"])
+        table_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+        scroll_y = ttk.Scrollbar(table_frame, orient=tk.VERTICAL)
+        scroll_x = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL)
+
+        columns = ("att_id", "student_id", "student_name", "subject", "total_classes", "attended", "percentage", "status")
+        self.tree = ttk.Treeview(
+            table_frame,
+            columns=columns,
+            show="headings",
+            yscrollcommand=scroll_y.set,
+            xscrollcommand=scroll_x.set
+        )
+
+        scroll_y.config(command=self.tree.yview)
+        scroll_x.config(command=self.tree.xview)
+
+        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+        self.tree.pack(fill=tk.BOTH, expand=True)
+
+        headers = {
+            "att_id": ("ID", 40),
+            "student_id": ("Student ID", 80),
+            "student_name": ("Student Name", 130),
+            "subject": ("Subject", 180),
+            "total_classes": ("Total Classes", 90),
+            "attended": ("Attended", 80),
+            "percentage": ("Percentage", 85),
+            "status": ("Status", 80)
+        }
+
+        for col_id, (col_name, col_width) in headers.items():
+            self.tree.heading(col_id, text=col_name, anchor=tk.CENTER)
+            self.tree.column(col_id, width=col_width, minwidth=40, anchor=tk.CENTER if col_width < 100 else tk.W)
+
+        self.tree.bind("<<TreeviewSelect>>", self.on_row_select)
+
+    def refresh_student_ids(self):
+        """Loads available student IDs into dropdown."""
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT student_id, name, roll_no FROM students ORDER BY student_id ASC")
+            students = cursor.fetchall()
+            conn.close()
+
+            id_list = [s[0] for s in students]
+            self.cmb_student_id["values"] = id_list
+            self.students_cache = {s[0]: f"{s[1]} (Roll: {s[2]})" for s in students}
+        except sqlite3.Error:
+            self.students_cache = {}
+
+    def on_student_change(self, event=None):
+        """Updates display badge and fetches cumulative summary for selected student."""
+        sid = self.var_student_id.get().strip().upper()
+        if sid in self.students_cache:
+            self.var_student_info.set(f"👤 {self.students_cache[sid]}")
+            self.calculate_cumulative_attendance(sid)
+        else:
+            try:
+                conn = get_connection()
+                cursor = conn.cursor()
+                cursor.execute("SELECT name, roll_no FROM students WHERE student_id = ?", (sid,))
+                row = cursor.fetchone()
+                conn.close()
+                if row:
+                    self.var_student_info.set(f"👤 {row[0]} (Roll: {row[1]})")
+                    self.calculate_cumulative_attendance(sid)
+                else:
+                    self.var_student_info.set("⚠️ Student not found in database")
+                    self.reset_cumulative()
+            except sqlite3.Error:
+                self.var_student_info.set("⚠️ Unable to verify student")
+                self.reset_cumulative()
+
+    def auto_compute(self):
+        """Calculates percentage and status dynamically as user types."""
+        tot_str = self.var_total_classes.get().strip()
+        att_str = self.var_attended.get().strip()
+
+        if not tot_str or not att_str:
+            self.var_percentage.set("0.0 %")
+            self.var_status.set("--")
+            return
+
+        valid, msg, total, attended, pct = validate_attendance(tot_str, att_str)
+        if valid:
+            status = get_attendance_status(pct)
+            self.var_percentage.set(f"{pct:.1f} %")
+            self.var_status.set(status)
+
+            if status == "Good":
+                self.lbl_status_display.config(fg=THEME["success"])
+            elif status == "Average":
+                self.lbl_status_display.config(fg=THEME["warning"])
+            else:
+                self.lbl_status_display.config(fg=THEME["danger"])
+        else:
+            self.var_percentage.set("--")
+            self.var_status.set("--")
+
+    def reset_cumulative(self):
+        self.var_cum_total.set("0")
+        self.var_cum_attended.set("0")
+        self.var_cum_percentage.set("0.0 %")
+        self.var_cum_status.set("--")
+
+    def calculate_cumulative_attendance(self, student_id):
+        """Calculates cumulative attendance across all subjects for a student."""
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT total_classes, classes_attended FROM attendance WHERE student_id = ?", (student_id,))
+            rows = cursor.fetchall()
+            conn.close()
+
+            if not rows:
+                self.reset_cumulative()
+                return
+
+            total_held = sum(r[0] for r in rows)
+            total_att = sum(r[1] for r in rows)
+            pct = round((total_att / total_held) * 100, 2) if total_held > 0 else 0.0
+            status = get_attendance_status(pct)
+
+            self.var_cum_total.set(str(total_held))
+            self.var_cum_attended.set(str(total_att))
+            self.var_cum_percentage.set(f"{pct:.2f} %")
+            self.var_cum_status.set(status)
+
+            if status == "Good":
+                self.lbl_cum_status.config(fg=THEME["success"])
+            elif status == "Average":
+                self.lbl_cum_status.config(fg=THEME["warning"])
+            else:
+                self.lbl_cum_status.config(fg=THEME["danger"])
+
+        except sqlite3.Error:
+            self.reset_cumulative()
+
+    def clear_form(self):
+        self.selected_att_id = None
+        self.var_student_id.set("")
+        self.var_student_info.set("Select or enter valid Student ID")
+        self.var_total_classes.set("40")
+        self.var_attended.set("")
+        self.var_percentage.set("0.0 %")
+        self.var_status.set("--")
+        self.reset_cumulative()
+        self.refresh_student_ids()
+
+    def add_attendance(self):
+        """Records attendance for a student."""
+        student_id = self.var_student_id.get().strip().upper()
+        subject = self.var_subject.get().strip()
+
+        if not student_id or not subject:
+            messagebox.showwarning("Incomplete Form", "Student ID and Subject are mandatory.", parent=self)
+            return
+
+        valid, msg, total, attended, pct = validate_attendance(self.var_total_classes.get(), self.var_attended.get())
+        if not valid:
+            messagebox.showwarning("Validation Error", msg, parent=self)
+            return
+
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+
+            # Verify student exists
+            cursor.execute("SELECT student_id FROM students WHERE student_id = ?", (student_id,))
+            if not cursor.fetchone():
+                messagebox.showerror("Error", f"Student with ID '{student_id}' does not exist.", parent=self)
+                conn.close()
+                return
+
+            # Check if attendance already recorded for this student & subject
+            cursor.execute(
+                "SELECT attendance_id FROM attendance WHERE student_id = ? AND subject = ?",
+                (student_id, subject)
+            )
+            if cursor.fetchone():
+                messagebox.showwarning(
+                    "Duplicate Subject Entry",
+                    f"Attendance for '{subject}' already exists for {student_id}.\nPlease use Update instead.",
+                    parent=self
+                )
+                conn.close()
+                return
+
+            cursor.execute("""
+                INSERT INTO attendance (student_id, subject, total_classes, classes_attended, attendance_percentage)
+                VALUES (?, ?, ?, ?, ?)
+            """, (student_id, subject, total, attended, pct))
+
+            conn.commit()
+            conn.close()
+
+            messagebox.showinfo("Success", f"Attendance for '{subject}' recorded successfully!", parent=self)
+            self.fetch_attendance()
+            self.calculate_cumulative_attendance(student_id)
+            self.clear_form()
+
+            if self.on_data_change:
+                self.on_data_change()
+
+        except sqlite3.Error as e:
+            messagebox.showerror("Database Error", f"Failed to record attendance:\n{e}", parent=self)
+
+    def update_attendance(self):
+        """Updates the selected attendance record."""
+        if not self.selected_att_id:
+            messagebox.showwarning("Selection Required", "Please select an attendance record from the table to update.", parent=self)
+            return
+
+        student_id = self.var_student_id.get().strip().upper()
+        subject = self.var_subject.get().strip()
+
+        valid, msg, total, attended, pct = validate_attendance(self.var_total_classes.get(), self.var_attended.get())
+        if not valid:
+            messagebox.showwarning("Validation Error", msg, parent=self)
+            return
+
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                UPDATE attendance SET
+                    subject = ?, total_classes = ?, classes_attended = ?,
+                    attendance_percentage = ?
+                WHERE attendance_id = ?
+            """, (subject, total, attended, pct, self.selected_att_id))
+
+            conn.commit()
+            conn.close()
+
+            messagebox.showinfo("Success", "Attendance record updated successfully!", parent=self)
+            self.fetch_attendance()
+            self.calculate_cumulative_attendance(student_id)
+
+            if self.on_data_change:
+                self.on_data_change()
+
+        except sqlite3.Error as e:
+            messagebox.showerror("Database Error", f"Failed to update attendance:\n{e}", parent=self)
+
+    def delete_attendance(self):
+        """Deletes the selected attendance record."""
+        if not self.selected_att_id:
+            messagebox.showwarning("Selection Required", "Please select a record from the table to delete.", parent=self)
+            return
+
+        confirm = messagebox.askyesno("Confirm Deletion", "Are you sure you want to delete this attendance record?", parent=self)
+        if not confirm:
+            return
+
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM attendance WHERE attendance_id = ?", (self.selected_att_id,))
+            conn.commit()
+            conn.close()
+
+            messagebox.showinfo("Success", "Attendance record deleted.", parent=self)
+            self.fetch_attendance()
+            self.clear_form()
+
+            if self.on_data_change:
+                self.on_data_change()
+
+        except sqlite3.Error as e:
+            messagebox.showerror("Database Error", f"Failed to delete attendance:\n{e}", parent=self)
+
+    def fetch_attendance(self):
+        """Fetches all attendance records joined with student name."""
+        self.var_search_query.set("")
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT a.attendance_id, a.student_id, s.name, a.subject,
+                       a.total_classes, a.classes_attended, a.attendance_percentage
+                FROM attendance a
+                LEFT JOIN students s ON a.student_id = s.student_id
+                ORDER BY a.student_id ASC, a.subject ASC
+            """)
+            rows = cursor.fetchall()
+            conn.close()
+
+            for item in self.tree.get_children():
+                self.tree.delete(item)
+
+            for row in rows:
+                pct = row[6]
+                status = get_attendance_status(pct)
+                display_row = (row[0], row[1], row[2], row[3], row[4], row[5], f"{pct:.1f}%", status)
+                self.tree.insert("", tk.END, values=display_row)
+
+            self.lbl_count.config(text=f"Total Records: {len(rows)}")
+
+        except sqlite3.Error as e:
+            messagebox.showerror("Database Error", f"Failed to fetch attendance:\n{e}", parent=self)
+
+    def search_attendance(self):
+        """Filters attendance records by student ID or student name."""
+        query = self.var_search_query.get().strip()
+        if not query:
+            self.fetch_attendance()
+            return
+
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT a.attendance_id, a.student_id, s.name, a.subject,
+                       a.total_classes, a.classes_attended, a.attendance_percentage
+                FROM attendance a
+                LEFT JOIN students s ON a.student_id = s.student_id
+                WHERE a.student_id LIKE ? OR s.name LIKE ?
+                ORDER BY a.student_id ASC, a.subject ASC
+            """, (f"%{query}%", f"%{query}%"))
+            rows = cursor.fetchall()
+            conn.close()
+
+            for item in self.tree.get_children():
+                self.tree.delete(item)
+
+            for row in rows:
+                pct = row[6]
+                status = get_attendance_status(pct)
+                display_row = (row[0], row[1], row[2], row[3], row[4], row[5], f"{pct:.1f}%", status)
+                self.tree.insert("", tk.END, values=display_row)
+
+            self.lbl_count.config(text=f"Matches Found: {len(rows)}")
+
+            if not rows:
+                messagebox.showinfo("Search Results", "No attendance records found matching query.", parent=self)
+
+        except sqlite3.Error as e:
+            messagebox.showerror("Search Error", f"Failed to search attendance:\n{e}", parent=self)
+
+    def on_row_select(self, event):
+        """Populates entry form when an attendance row is clicked."""
+        selected_item = self.tree.focus()
+        if not selected_item:
+            return
+
+        values = self.tree.item(selected_item, "values")
+        if not values:
+            return
+
+        self.selected_att_id = values[0]
+        self.var_student_id.set(values[1])
+        self.on_student_change()
+        self.var_subject.set(values[3])
+        self.var_total_classes.set(values[4])
+        self.var_attended.set(values[5])
+        self.var_percentage.set(values[6])
+        self.var_status.set(values[7])
